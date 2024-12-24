@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-from dotenv import load_dotenv
 import json
+import logging
 import os
 from time import perf_counter
 from typing import Annotated
-from livekit import rtc, api
+
+from dotenv import load_dotenv
+from livekit import api, rtc
 from livekit.agents import (
     AutoSubscribe,
     JobContext,
@@ -18,23 +19,45 @@ from livekit.agents import (
 )
 from livekit.agents.multimodal import MultimodalAgent
 from livekit.agents.pipeline import VoicePipelineAgent
-from livekit.plugins import deepgram, openai, silero
-
+from livekit.plugins import deepgram, elevenlabs, openai, silero
 
 # load environment variables, this is optional, only used for local development
-load_dotenv(dotenv_path=".env.local")
+load_dotenv()
 logger = logging.getLogger("outbound-caller")
 logger.setLevel(logging.INFO)
 
 outbound_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID")
-_default_instructions = (
-    "You are a scheduling assistant for a dental practice. Your interface with user will be voice."
-    "You will be on a call with a patient who has an upcoming appointment. Your goal is to confirm the appointment details."
-    "As a customer service representative, you will be polite and professional at all times. Allow user to end the conversation."
+_default_instructions = "You are a helpful assistant. "
+
+from dataclasses import dataclass
+
+
+@dataclass
+class VoiceSettings:
+    stability: float  # [0.0 - 1.0]
+    similarity_boost: float  # [0.0 - 1.0]
+    style: float | None = None  # [0.0 - 1.0]
+    use_speaker_boost: bool | None = False
+
+
+@dataclass
+class Voice:
+    id: str
+    name: str
+    category: str
+    settings: VoiceSettings | None = None
+
+
+voice = Voice(
+    id="b3qWCVgdySFQkxXLM1yz",
+    name="AI Clone Voice Amiee",
+    category="professional",
+    settings=None,
 )
 
 
 async def entrypoint(ctx: JobContext):
+    logger.info("ctx", ctx)
     global _default_instructions, outbound_trunk_id
     logger.info(f"connecting to room {ctx.room.name}")
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
@@ -45,10 +68,7 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"dialing {phone_number} to room {ctx.room.name}")
 
     # look up the user's phone number and appointment details
-    instructions = (
-        _default_instructions
-        + "The customer's name is Jayden. His appointment is next Tuesday at 3pm."
-    )
+    instructions = _default_instructions
 
     # `create_sip_participant` starts dialing the user
     await ctx.api.sip.create_sip_participant(
@@ -66,8 +86,8 @@ async def entrypoint(ctx: JobContext):
     # start the agent, either a VoicePipelineAgent or MultimodalAgent
     # this can be started before the user picks up. The agent will only start
     # speaking once the user answers the call.
-    # run_voice_pipeline_agent(ctx, participant, instructions)
-    run_multimodal_agent(ctx, participant, instructions)
+    run_voice_pipeline_agent(ctx, participant, instructions)
+    # run_multimodal_agent(ctx, participant, instructions)
 
     # in addition, you can monitor the call status separately
     start_time = perf_counter()
@@ -123,33 +143,33 @@ class CallActions(llm.FunctionContext):
         logger.info(f"ending the call for {self.participant.identity}")
         await self.hangup()
 
-    @llm.ai_callable()
-    async def look_up_availability(
-        self,
-        date: Annotated[str, "The date of the appointment to check availability for"],
-    ):
-        """Called when the user asks about alternative appointment availability"""
-        logger.info(
-            f"looking up availability for {self.participant.identity} on {date}"
-        )
-        asyncio.sleep(3)
-        return json.dumps(
-            {
-                "available_times": ["1pm", "2pm", "3pm"],
-            }
-        )
+    # @llm.ai_callable()
+    # async def look_up_availability(
+    #     self,
+    #     date: Annotated[str, "The date of the appointment to check availability for"],
+    # ):
+    #     """Called when the user asks about alternative appointment availability"""
+    #     logger.info(
+    #         f"looking up availability for {self.participant.identity} on {date}"
+    #     )
+    #     asyncio.sleep(3)
+    #     return json.dumps(
+    #         {
+    #             "available_times": ["1pm", "2pm", "3pm"],
+    #         }
+    #     )
 
-    @llm.ai_callable()
-    async def confirm_appointment(
-        self,
-        date: Annotated[str, "date of the appointment"],
-        time: Annotated[str, "time of the appointment"],
-    ):
-        """Called when the user confirms their appointment on a specific date. Use this tool only when they are certain about the date and time."""
-        logger.info(
-            f"confirming appointment for {self.participant.identity} on {date} at {time}"
-        )
-        return "reservation confirmed"
+    # @llm.ai_callable()
+    # async def confirm_appointment(
+    #     self,
+    #     date: Annotated[str, "date of the appointment"],
+    #     time: Annotated[str, "time of the appointment"],
+    # ):
+    #     """Called when the user confirms their appointment on a specific date. Use this tool only when they are certain about the date and time."""
+    #     logger.info(
+    #         f"confirming appointment for {self.participant.identity} on {date} at {time}"
+    #     )
+    #     return "reservation confirmed"
 
     @llm.ai_callable()
     async def detected_answering_machine(self):
@@ -172,7 +192,7 @@ def run_voice_pipeline_agent(
         vad=ctx.proc.userdata["vad"],
         stt=deepgram.STT(model="nova-2-phonecall"),
         llm=openai.LLM(),
-        tts=openai.TTS(),
+        tts=elevenlabs.TTS(streaming_latency=1, voice=voice),
         chat_ctx=initial_ctx,
         fnc_ctx=CallActions(api=ctx.api, participant=participant, room=ctx.room),
     )
